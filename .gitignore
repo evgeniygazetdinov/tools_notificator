@@ -1,0 +1,10 @@
+const.py
+db.sqlite
+*.pyc
+*.py.swp
+
+__pycache__/
+session/
+node_modules/
+package-lock.json
+active_users
