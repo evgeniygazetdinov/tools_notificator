@@ -1,1 +1,2 @@
-# some custom implementation telegram bot on standart requests lib
+# fork engine from https://github.com/evgeniygazetdinov/tools_b
+telegramm bot chat-group parser
