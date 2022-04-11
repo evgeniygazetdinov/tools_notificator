@@ -66,10 +66,6 @@ def check_telegram_updates():
             cur_user, cur_chat, cur_message, message_id = find_user_message_chat(
                 updates["result"]
             )
-            push_active_users(cur_user)
-            login_keyboard = build_keyboard(login_items)
-            menu_keyboard = build_keyboard(menu_items)
-            user_session = Session(cur_user, cur_chat, message_id)
             if cur_message == "/start":
                 send_message("Привет это бот фотохостинга", cur_chat)
             if cur_message:
