@@ -8,3 +8,5 @@ session/
 node_modules/
 package-lock.json
 active_users
+lin/n_Set.session
+n_Set.session
