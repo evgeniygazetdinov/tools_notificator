@@ -6,6 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import speech_recognition as sr
 from pydub import AudioSegment
 import time
+from spellchecker import SpellChecker
+import re
 
 load_dotenv()
 
@@ -18,34 +20,165 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Добавляем словарь для хранения распознанных текстов
+# Add dictionary for storing recognized texts
 recognized_texts = {}
 
+# Initialize spell checking for Russian language
+spell = SpellChecker(language='ru')
+
+def correct_spelling(text):
+    """Corrects spelling errors in text while preserving punctuation marks"""
+    import re
+    
+    # Regular expression to extract words and punctuation marks
+    pattern = r'([^\W\d_]+|\d+|[^\w\s])'
+    tokens = re.findall(pattern, text)
+    
+    corrected_tokens = []
+    
+    for token in tokens:
+        # If it's a punctuation mark or a number, leave it as is
+        if not token.isalpha() or len(token) <= 2:
+            corrected_tokens.append(token)
+            continue
+        
+        # Check spelling only for words
+        if token.lower() in spell:
+            corrected_token = token  # Word is correct
+        else:
+            corrected_token = spell.correction(token.lower())
+            if corrected_token:
+                # Save the first letter's case
+                if token[0].isupper():
+                    corrected_token = corrected_token.capitalize()
+            else:
+                corrected_token = token  # Если исправление не найдено
+        
+        corrected_tokens.append(corrected_token)
+    
+    # Restore spaces between words and punctuation marks
+    result = ""
+    for i, token in enumerate(corrected_tokens):
+        # Do not add space before punctuation marks
+        if token in ',.!?:;)]}»"' and i > 0:
+            result += token
+        # Do not add space after opening brackets, quotes, etc.
+        elif i > 0 and corrected_tokens[i-1] in '([{«"':
+            result += token
+        # In other cases, add a space between tokens
+        elif i > 0:
+            result += " " + token
+        else:
+            result += token
+    
+    return result
+
+def add_simple_punctuation(text):
+    """
+    Добавляет базовую пунктуацию в текст на основе простых правил.
+    Не требует внешних библиотек.
+    """
+    if not text:
+        return text
+        
+    # Разбиваем текст на предложения по возможным границам
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    result = []
+    
+    for sentence in sentences:
+        # Если предложение уже заканчивается знаком препинания, оставляем как есть
+        if sentence and sentence[-1] in '.!?':
+            result.append(sentence)
+            continue
+            
+        # Определяем, какой знак препинания добавить в конце
+        if re.search(r'\b(кто|что|где|когда|почему|зачем|как|какой|какая|какое|какие|сколько)\b', 
+                    sentence.lower()):
+            result.append(sentence + '?')
+        elif re.search(r'\b(ура|вау|ого|ничего себе|невероятно|потрясающе|круто|здорово|супер)\b', 
+                      sentence.lower()):
+            result.append(sentence + '!')
+        else:
+            result.append(sentence + '.')
+    
+    # Добавляем запятые перед определенными союзами
+    text = ' '.join(result)
+    text = re.sub(r'\s+(а|но|однако|зато|или|либо|ведь|потому что|поэтому|так как|если|чтобы)\s+', 
+                 r', \1 ', text)
+    
+    # Капитализируем первую букву каждого предложения
+    text = re.sub(r'([.!?]\s*)([a-zа-я])', lambda m: m.group(1) + m.group(2).upper(), text)
+    
+    # Капитализируем первую букву всего текста
+    if text and text[0].isalpha():
+        text = text[0].upper() + text[1:]
+        
+    return text
+
+def restore_punctuation_deeppavlov(text):
+    """
+    Восстанавливает знаки препинания в тексте с помощью модели DeepPavlov.
+    Если модель не загружена или произошла ошибка, возвращает текст с простой пунктуацией.
+    """
+    global deeppavlov_loaded, punctuation_model
+    
+    # Если текст пустой, возвращаем его как есть
+    if not text:
+        return text
+    
+    # Пробуем загрузить модель DeepPavlov, если она еще не загружена
+    if not deeppavlov_loaded:
+        try:
+            logger.info("Загрузка модели DeepPavlov для восстановления пунктуации...")
+            from deeppavlov import build_model, configs
+            
+            # Загружаем модель для восстановления пунктуации
+            punctuation_model = build_model("punctuation_restore", download=True)
+            deeppavlov_loaded = True
+            logger.info("Модель DeepPavlov успешно загружена")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке модели DeepPavlov: {e}")
+            # Если не удалось загрузить модель, используем простую функцию
+            return add_simple_punctuation(text)
+    
+    # Используем модель для восстановления пунктуации
+    try:
+        # DeepPavlov ожидает список предложений
+        result = punctuation_model([text])
+        if result and len(result) > 0:
+            return result[0]
+        else:
+            return add_simple_punctuation(text)
+    except Exception as e:
+        logger.error(f"Ошибка при восстановлении пунктуации с DeepPavlov: {e}")
+        # В случае ошибки используем простую функцию
+        return add_simple_punctuation(text)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет приветственное сообщение при команде /start"""
+    """Send greeting message when /start command is issued"""
     user = update.effective_user
     await update.message.reply_html(
         f"Привет, {user.mention_html()}! 👋\nПросто отправь мне голосовое сообщение, и я преобразую его в текст."
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет справку при команде /help"""
+    """Send help message when /help command is issued"""
     help_text = """
-    🤖 Как пользоваться ботом:
-    1. Просто запиши и отправь мне голосовое сообщение.
-    2. Я скачаю его, обработаю и отправлю тебе распознанный текст.
+    🤖 How to use the bot:
+    1. Simply record and send me a voice message.
+    2. I will download it, process it, and send you the recognized text.
     
-    ⚠️ *Пока что я лучше всего понимаю голосовые на русском языке.*
+    ⚠️ *Currently, I best understand voice messages in Russian.*
     """
     await update.message.reply_markdown(help_text)
 
 def convert_ogg_to_wav(ogg_file_path):
-    """Конвертирует аудиофайл из формата .ogg (Telegram) в .wav (для SpeechRecognition)"""
+    """Converts an audio file from .ogg (Telegram) format to .wav (for SpeechRecognition)"""
     wav_file_path = ogg_file_path.replace(".ogg", ".wav")
     
-    # Загружаем .ogg файл
+    # Load .ogg file
     audio = AudioSegment.from_ogg(ogg_file_path)
-    # Экспортируем в .wav с нужными параметрами
+    # Export to .wav with necessary parameters
     audio.export(wav_file_path, format="wav", parameters=["-ac", "1", "-ar", "16000"])
     
     return wav_file_path
@@ -60,8 +193,8 @@ def speech_to_text(audio_file_path):
         audio_data = recognizer.record(source)
     
     try:
-        # Используем Google Web Speech API
-        # Указываем язык: 'ru-RU' для русского
+        # Use Google Web Speech API
+        # Specify language: 'ru-RU' for Russian
         text = recognizer.recognize_google(audio_data, language='ru-RU')
         return text
     except sr.UnknownValueError:
@@ -71,33 +204,39 @@ def speech_to_text(audio_file_path):
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает входящие голосовые сообщения"""
-    # Проверяем, есть ли сообщение и голосовое сообщение
+    # Check if message and voice message exist
     if not update.message or not update.message.voice:
         return
         
-    # Получаем информацию о файле
+    # Get file information
     voice_file = await update.message.voice.get_file()
     user_id = update.message.from_user.id
     file_id = voice_file.file_id
     ogg_file_path = f"temp_voice_{user_id}_{file_id}.ogg"
     wav_file_path = None
     
-    # Скачиваем файл
+    # Upload file to Telegram server
     await voice_file.download_to_drive(ogg_file_path)
-    await update.message.reply_text("🎙️ Аудио получено! Обрабатываю...")
+    await update.message.reply_text("🎙️ Audio received! Processing...")
     
     try:
-        # Конвертируем .ogg в .wav
+        # Convert .ogg to .wav
         wav_file_path = convert_ogg_to_wav(ogg_file_path)
         
-        # Распознаем речь
+        # Recognize speech
         recognized_text = speech_to_text(wav_file_path)
         
-        # Генерируем уникальный ID для текста
+        # Correct spelling errors
+        corrected_text = correct_spelling(recognized_text)
+        
+        # Восстанавливаем пунктуацию с помощью DeepPavlov
+        corrected_text = restore_punctuation_deeppavlov(corrected_text)
+        
+        # Generate unique ID for text
         text_id = f"text_{user_id}_{int(time.time())}"
         
-        # Сохраняем текст в словаре
-        recognized_texts[text_id] = recognized_text
+        # Save text in dictionary
+        recognized_texts[text_id] = corrected_text
         
         # Создаем кнопку "Скопировать текст" с коротким ID вместо полного текста
         keyboard = [
@@ -107,7 +246,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
         # Отправляем результат пользователю с кнопкой
         await update.message.reply_text(
-            f"🎙️ Распознанный текст:\n{recognized_text}", 
+            f"🎙️ Распознанный текст:\n{corrected_text}", 
             reply_markup=reply_markup
         )
         
@@ -124,26 +263,26 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_channel_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает голосовые сообщения из канала"""
-    # Проверяем, есть ли голосовое сообщение
+    # Check if message and voice message exist
     if not update.channel_post or not update.channel_post.voice:
         return
     
-    # Получаем информацию о канале
+    # Get channel information
     channel_id = update.channel_post.chat.id
     channel_title = update.channel_post.chat.title
     message_id = update.channel_post.message_id
     
-    # Получаем информацию о файле
+    # Get file information
     voice_file = await update.channel_post.voice.get_file()
     file_id = voice_file.file_id
     ogg_file_path = f"temp_voice_channel_{channel_id}_{file_id}.ogg"
     wav_file_path = None
     
-    # Логируем получение сообщения
-    logger.info(f"Получено голосовое сообщение из канала '{channel_title}' (ID: {channel_id})")
+    # Log received message
+    logger.info(f"Получено голосовое сообщение из канала  '{channel_title}' (ID: {channel_id})")
     
     try:
-        # Скачиваем файл
+        # Download file
         await voice_file.download_to_drive(ogg_file_path)
         
         # Конвертируем .ogg в .wav
@@ -152,11 +291,17 @@ async def handle_channel_voice_message(update: Update, context: ContextTypes.DEF
         # Распознаем речь
         recognized_text = speech_to_text(wav_file_path)
         
+        # Исправляем орфографические ошибки
+        corrected_text = correct_spelling(recognized_text)
+        
+        # Восстанавливаем пунктуацию с помощью DeepPavlov
+        corrected_text = restore_punctuation_deeppavlov(corrected_text)
+        
         # Генерируем уникальный ID для текста
         text_id = f"text_{channel_id}_{int(time.time())}"
         
         # Сохраняем текст в словаре
-        recognized_texts[text_id] = recognized_text
+        recognized_texts[text_id] = corrected_text
         
         # Создаем кнопку "Скопировать текст" с коротким ID вместо полного текста
         keyboard = [
@@ -167,7 +312,7 @@ async def handle_channel_voice_message(update: Update, context: ContextTypes.DEF
         # Отправляем результат в канал как ответ на голосовое сообщение с кнопкой
         await context.bot.send_message(
             chat_id=channel_id,
-            text=f"🎙️ Распознанный текст:\n{recognized_text}",
+            text=f"🎙️ Распознанный текст:\n{corrected_text}",
             reply_to_message_id=message_id,
             reply_markup=reply_markup
         )
@@ -205,6 +350,9 @@ async def handle_copy_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=f"Текст скопирован в буфер обмена: {text}")
     else:
         await query.edit_message_text(text="Текст не найден.")
+
+deeppavlov_loaded = False
+punctuation_model = None
 
 def main():
     """Запускает бота"""
